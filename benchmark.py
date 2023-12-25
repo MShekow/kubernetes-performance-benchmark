@@ -4,6 +4,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from typing import Mapping, MutableSet, Tuple, MutableMapping
 
 from kubernetes import config, client
 from kubernetes.client import CoreV1Api, V1Pod
@@ -142,7 +143,7 @@ MARKER_LINE = "benchmarkresult"
 
 def extract_relevant_log_lines(pod_log: str, node_pool_name: str) -> list[str]:
     """
-    Returns the lines of the provided Pod log that actually contain benchmark results.
+    Returns the last few lines of the provided Pod log that actually contain benchmark results.
     """
     log_lines = pod_log.splitlines(keepends=False)
 
@@ -186,39 +187,10 @@ PTS_CSV_REGEX = re.compile(
 
 def extract_benchmark_results_from_pod_log(pod_log: str, node_pool_name: str) -> list[BenchmarkResult]:
     """
-    Extracts the benchmark results from the provided Pod log (which contains the benchmark results in CSV format).
+    Extracts the benchmark results from the provided Pod log (which contains the benchmark results in CSV format
+    towards the end, so this function finds the last few relevant lines).
     """
-    benchmark_results = []
-    relevant_lines = extract_relevant_log_lines(pod_log, node_pool_name)
-    for line in relevant_lines:
-        # Example for line: "Flexible IO Tester - Disk Random Write, Block Size: 4KB (MB/s)",HIB,55.2
-        # Extract the relevant data using a regex
-        match = PTS_CSV_REGEX.search(line)
-        if not match:
-            raise ValueError(f"Unable to parse line '{line}' in the '{node_pool_name}' Pod log (regex failed)")
-
-        test_tool = match.group("testtool")
-        test_config = match.group("testconfig").strip()
-        result_unit = match.group("resultunit")
-        hib = match.group("hib")
-        result_value = match.group("resultvalue")
-
-        if hib != "HIB":
-            raise ValueError(f"Invalid value '{hib}' in line '{line}' in "
-                             f"the '{node_pool_name}' Pod log (expected 'HIB')")
-
-        benchmark_results.append(BenchmarkResult(vm_type=node_pool_name, tool_name=test_tool, tool_config=test_config,
-                                                 result_unit=result_unit, result_value=result_value))
-
-    return benchmark_results
-
-
-def collect_benchmark_results(core_v1: CoreV1Api, pods: list[V1Pod]) -> str:
-    """
-    Collects the Pod logs (which contain the benchmark results) from the provided pods and returns a string that
-    contains the parsed benchmark results in CSV format (using semicolon as separator).
-    """
-    # Here is an example of a Pod log:
+    # Here is an example of a raw Pod log:
     """
     <lots of log lines of Phoronix test suite>
     <empty line>
@@ -265,17 +237,88 @@ def collect_benchmark_results(core_v1: CoreV1Api, pods: list[V1Pod]) -> str:
     "Sysbench - Disk Sequential Write, Block Size: 4MB (IOPS (write))",HIB,98.57
     "Sysbench - Disk Sequential Write, Block Size: 4MB (MiB/s (write))",HIB,394.29
     """
-    benchmark_result_lines = ['vm_type;tool_name;tool_config;result_unit;result_value']
-    for pod in pods:
-        pod_log = core_v1.read_namespaced_pod_log(pod.metadata.name, pod.metadata.namespace)
-        node_pool_name = pod.spec.node_selector[node_pool_name_label_selector]
-        benchmark_results = extract_benchmark_results_from_pod_log(pod_log, node_pool_name)
-        for benchmark_result in benchmark_results:
-            benchmark_result_lines.append(f"{benchmark_result.vm_type};{benchmark_result.tool_name};"
-                                          f"{benchmark_result.tool_config};{benchmark_result.result_unit};"
-                                          f"{benchmark_result.result_value}")
+
+    benchmark_results = []
+    relevant_lines = extract_relevant_log_lines(pod_log, node_pool_name)
+    for line in relevant_lines:
+        # Example for line: "Flexible IO Tester - Disk Random Write, Block Size: 4KB (MB/s)",HIB,55.2
+        # Extract the relevant data using a regex
+        match = PTS_CSV_REGEX.search(line)
+        if not match:
+            raise ValueError(f"Unable to parse line '{line}' in the '{node_pool_name}' Pod log (regex failed)")
+
+        test_tool = match.group("testtool")
+        test_config = match.group("testconfig").strip()
+        result_unit = match.group("resultunit")
+        hib = match.group("hib")
+        result_value = match.group("resultvalue")
+
+        if hib != "HIB":
+            raise ValueError(f"Invalid value '{hib}' in line '{line}' in "
+                             f"the '{node_pool_name}' Pod log (expected 'HIB')")
+
+        benchmark_results.append(BenchmarkResult(vm_type=node_pool_name, tool_name=test_tool, tool_config=test_config,
+                                                 result_unit=result_unit, result_value=result_value))
+
+    return benchmark_results
+
+
+def collect_benchmark_results(pod_logs: Mapping[str, str]) -> str:
+    """
+    Given the pod logs, this function returns a string that contains the parsed benchmark results in CSV format (
+    using semicolon as separator). It groups the results so that the resulting CSV file has the following structure:
+    <tool name + config + result unit>;<vm type 1>;<vm type 2>;...
+    """
+    # Parse benchmark results
+    benchmark_results: MutableMapping[str, list[BenchmarkResult]] = {}  # maps from the node_pool_name to the results
+    for node_pool_name, pod_log in pod_logs.items():
+        benchmark_results[node_pool_name] = extract_benchmark_results_from_pod_log(pod_log, node_pool_name)
+
+    # Get unique listing of all tool names and tool configs
+    tool_names_with_config_and_unit: MutableSet[Tuple[str, str, str]] = set()
+    for node_pool_name, benchmark_result_items in benchmark_results.items():
+        for benchmark_result_item in benchmark_result_items:
+            tool_names_with_config_and_unit.add(
+                (benchmark_result_item.tool_name, benchmark_result_item.tool_config, benchmark_result_item.result_unit))
+
+    tool_names_with_config_sorted: list[Tuple[str, str, str]] = list(tool_names_with_config_and_unit)
+    tool_names_with_config_sorted.sort()
+
+    header_line = "Tool name + config + result unit"
+    for node_pool_name in get_node_pool_names():
+        header_line += f";{node_pool_name}"
+
+    benchmark_result_lines = [header_line]
+
+    for tool_name, tool_config, result_unit in tool_names_with_config_sorted:
+        benchmark_result_line = f"{tool_name} - {tool_config} ({result_unit})"
+        for node_pool_name in get_node_pool_names():
+            benchmark_result_items = benchmark_results[node_pool_name]
+            found_matching_result = False
+            for benchmark_result_item in benchmark_result_items:
+                if benchmark_result_item.tool_name == tool_name and benchmark_result_item.tool_config == tool_config and benchmark_result_item.result_unit == result_unit:
+                    benchmark_result_line += f";{benchmark_result_item.result_value}"
+                    found_matching_result = True
+                    break
+            if not found_matching_result:
+                raise ValueError(f"Unable to find benchmark result for tool '{tool_name}' and config '{tool_config}' "
+                                 f"for node pool '{node_pool_name}'")
+
+        benchmark_result_lines.append(benchmark_result_line)
 
     return "\n".join(benchmark_result_lines)
+
+
+def get_pod_logs(core_v1: CoreV1Api) -> Mapping[str, str]:
+    """
+    Returns a mapping from the node pool name to pod log.
+    """
+    pod_logs = {}
+    for node_pool_name in get_node_pool_names():
+        pod_name = get_pod_name_from_node_pool_name(node_pool_name)
+        pod_log = core_v1.read_namespaced_pod_log(pod_name, USED_NAMESPACE)
+        pod_logs[node_pool_name] = pod_log
+    return pod_logs
 
 
 def store_raw_logs(core_v1: CoreV1Api, pods: list[V1Pod]):
@@ -293,23 +336,44 @@ def store_raw_logs(core_v1: CoreV1Api, pods: list[V1Pod]):
             f.write(pod_log)
 
 
+def get_local_pod_logs() -> Mapping[str, str]:
+    """
+    Returns a mapping from the node pool name to the pod log.
+    """
+    pod_logs = {}
+    existing_log_folder_name = should_reparse_existing_raw_logs()
+    for node_pool_name in get_node_pool_names():
+        with open(f"raw-results/{existing_log_folder_name}/{node_pool_name}.log", "r") as f:
+            pod_log = f.read()
+        pod_logs[node_pool_name] = pod_log
+    return pod_logs
+
+
+def should_reparse_existing_raw_logs() -> str:
+    return os.getenv("REPARSE_EXISTING_RAW_LOGS", "")
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
-    config.load_kube_config(config_file="kubeconfig")
-
-    core_v1 = client.CoreV1Api()
-
-    # Verify that the credentials are working (raises otherwise)
-    core_v1.list_node()
-
-    if os.getenv("SKIP_POD_CREATION") == "true":
-        pods = find_benchmark_pods(core_v1)
+    if should_reparse_existing_raw_logs():
+        pod_logs = get_local_pod_logs()
     else:
-        pods = create_benchmark_pods(core_v1)
-    wait_for_pods_to_finish(core_v1, pods)
-    csv_content = collect_benchmark_results(core_v1, pods)
+        config.load_kube_config(config_file="kubeconfig")
+        core_v1 = client.CoreV1Api()
+        # Verify that the credentials are working (raises otherwise)
+        core_v1.list_node()
+
+        if os.getenv("SKIP_POD_CREATION") == "true":
+            pods = find_benchmark_pods(core_v1)
+        else:
+            pods = create_benchmark_pods(core_v1)
+        wait_for_pods_to_finish(core_v1, pods)
+        pod_logs = get_pod_logs(core_v1)
+
+    csv_content = collect_benchmark_results(pod_logs)
     with open("benchmark_results.csv", "w") as f:
         f.write(csv_content)
 
-    store_raw_logs(core_v1, pods)
+    if not should_reparse_existing_raw_logs():
+        store_raw_logs(core_v1, pods)
