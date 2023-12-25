@@ -37,6 +37,9 @@ def get_node_pool_names() -> list[str]:
         return list(terraform_vars["node_pools"].keys())
 
 
+get_pod_name_from_node_pool_name = lambda node_pool_name: sanitize_name_rfc_1123(f"benchmark-{node_pool_name}")
+
+
 def create_benchmark_pods(core_v1: CoreV1Api) -> list[V1Pod]:
     """
     Creates one Pod for each node pool defined in the terraform/$K8S_PROVIDER/va.rsauto.tfvars.json file, using the
@@ -44,42 +47,51 @@ def create_benchmark_pods(core_v1: CoreV1Api) -> list[V1Pod]:
     """
     pods = []
 
-    k8s_provider = os.getenv("K8S_PROVIDER", None)
     image = os.getenv("BENCHMARK_IMAGE", "ghcr.io/mshekow/pts-docker-benchmark:2023.12.15")
 
-    with open(f"terraform/{k8s_provider}/vars.auto.tfvars.json") as f:
-        terraform_vars = json.load(f)
-        for node_pool_name in terraform_vars["node_pools"].keys():
-            pod_manifest = {
-                'apiVersion': 'v1',
-                'kind': 'Pod',
-                'metadata': {
-                    'name': sanitize_name_rfc_1123(f"benchmark-{node_pool_name}"),
-                    'labels': {
-                        'app': 'benchmark'
-                    }
-                },
-                'spec': {
-                    'containers': [{
-                        'image': image,
-                        'name': 'benchmark'
-                    }],
-                    'restartPolicy': 'Never',
-                    'nodeSelector': {
-                        node_pool_name_label_selector: node_pool_name
-                    }
+    for node_pool_name in get_node_pool_names():
+        pod_manifest = {
+            'apiVersion': 'v1',
+            'kind': 'Pod',
+            'metadata': {
+                'name': get_pod_name_from_node_pool_name(node_pool_name),
+                'labels': {
+                    'app': 'benchmark'
+                }
+            },
+            'spec': {
+                'containers': [{
+                    'image': image,
+                    'name': 'benchmark'
+                }],
+                'restartPolicy': 'Never',
+                'nodeSelector': {
+                    node_pool_name_label_selector: node_pool_name
                 }
             }
-            try:
+        }
+        try:
+            pod = core_v1.create_namespaced_pod(body=pod_manifest, namespace=USED_NAMESPACE)
+        except client.exceptions.ApiException as e:
+            if e.status == 409:
+                logging.info(f"Replacing Pod {pod_manifest['metadata']['name']} because it already exists")
+                core_v1.delete_namespaced_pod(pod_manifest['metadata']['name'], USED_NAMESPACE)
                 pod = core_v1.create_namespaced_pod(body=pod_manifest, namespace=USED_NAMESPACE)
-            except client.exceptions.ApiException as e:
-                if e.status == 409:
-                    logging.info(f"Replacing Pod {pod_manifest['metadata']['name']} because it already exists")
-                    core_v1.delete_namespaced_pod(pod_manifest['metadata']['name'], USED_NAMESPACE)
-                    pod = core_v1.create_namespaced_pod(body=pod_manifest, namespace=USED_NAMESPACE)
-                else:
-                    raise e
-            pods.append(pod)
+            else:
+                raise e
+        pods.append(pod)
+    return pods
+
+
+def find_benchmark_pods(core_v1: CoreV1Api) -> list[V1Pod]:
+    """
+    Finds the Pods that were created by the create_benchmark_pods() method.
+    """
+    pods = []
+    for node_pool_name in get_node_pool_names():
+        pod_name = get_pod_name_from_node_pool_name(node_pool_name)
+        pod = core_v1.read_namespaced_pod(pod_name, USED_NAMESPACE)
+        pods.append(pod)
     return pods
 
 
@@ -266,6 +278,21 @@ def collect_benchmark_results(core_v1: CoreV1Api, pods: list[V1Pod]) -> str:
     return "\n".join(benchmark_result_lines)
 
 
+def store_raw_logs(core_v1: CoreV1Api, pods: list[V1Pod]):
+    """
+    Stores the raw logs of the benchmark Pods in files named "raw-results/<YYYY-MM-DD-HH-MM>/<node_pool_name>.log".
+    """
+    os.makedirs("raw-results", exist_ok=True)
+    result_folder_name = f"raw-results/{time.strftime('%Y-%m-%d-%H-%M')}"
+    os.makedirs(result_folder_name, exist_ok=True)
+
+    for pod in pods:
+        pod_log = core_v1.read_namespaced_pod_log(pod.metadata.name, pod.metadata.namespace)
+        node_pool_name = pod.spec.node_selector[node_pool_name_label_selector]
+        with open(f"{result_folder_name}/{node_pool_name}.log", "w") as f:
+            f.write(pod_log)
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -276,8 +303,13 @@ if __name__ == '__main__':
     # Verify that the credentials are working (raises otherwise)
     core_v1.list_node()
 
-    pods = create_benchmark_pods(core_v1)
+    if os.getenv("SKIP_POD_CREATION") == "true":
+        pods = find_benchmark_pods(core_v1)
+    else:
+        pods = create_benchmark_pods(core_v1)
     wait_for_pods_to_finish(core_v1, pods)
     csv_content = collect_benchmark_results(core_v1, pods)
     with open("benchmark_results.csv", "w") as f:
         f.write(csv_content)
+
+    store_raw_logs(core_v1, pods)
