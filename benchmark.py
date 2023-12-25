@@ -263,11 +263,16 @@ def extract_benchmark_results_from_pod_log(pod_log: str, node_pool_name: str) ->
     return benchmark_results
 
 
+ENV_VAR_NORMALIZED_RESULTS = "ADD_NORMALIZED_RESULTS"
+
+
 def collect_benchmark_results(pod_logs: Mapping[str, str]) -> str:
     """
-    Given the pod logs, this function returns a string that contains the parsed benchmark results in CSV format (
-    using semicolon as separator). It groups the results so that the resulting CSV file has the following structure:
+    Given the pod logs, this function returns a string that contains the parsed benchmark results in CSV format
+    (using semicolon as separator). It groups the results so that the resulting CSV file has the following structure:
     <tool name + config + result unit>;<vm type 1>;<vm type 2>;...
+    If ENV_VAR_NORMALIZED_RESULTS is set to "true", it also adds one normalized column per vm type, where the smallest
+    value is set to 100 and the other values are expressed as percent.
     """
     # Parse benchmark results
     benchmark_results: MutableMapping[str, list[BenchmarkResult]] = {}  # maps from the node_pool_name to the results
@@ -287,22 +292,33 @@ def collect_benchmark_results(pod_logs: Mapping[str, str]) -> str:
     header_line = "Tool name + config + result unit"
     for node_pool_name in get_node_pool_names():
         header_line += f";{node_pool_name}"
+    if os.getenv(ENV_VAR_NORMALIZED_RESULTS) == "true":
+        for node_pool_name in get_node_pool_names():
+            header_line += f";{node_pool_name} (normalized)"
 
     benchmark_result_lines = [header_line]
 
     for tool_name, tool_config, result_unit in tool_names_with_config_sorted:
         benchmark_result_line = f"{tool_name} - {tool_config} ({result_unit})"
+        normalized_results = []
         for node_pool_name in get_node_pool_names():
             benchmark_result_items = benchmark_results[node_pool_name]
             found_matching_result = False
             for benchmark_result_item in benchmark_result_items:
                 if benchmark_result_item.tool_name == tool_name and benchmark_result_item.tool_config == tool_config and benchmark_result_item.result_unit == result_unit:
+                    normalized_results.append(float(benchmark_result_item.result_value))
                     benchmark_result_line += f";{benchmark_result_item.result_value}"
                     found_matching_result = True
                     break
             if not found_matching_result:
                 raise ValueError(f"Unable to find benchmark result for tool '{tool_name}' and config '{tool_config}' "
                                  f"for node pool '{node_pool_name}'")
+
+        if os.getenv(ENV_VAR_NORMALIZED_RESULTS) == "true":
+            min_value = min(normalized_results)
+            normalized_results = [round(100 * x / min_value, 2) for x in normalized_results]
+            for normalized_result in normalized_results:
+                benchmark_result_line += f";{normalized_result}"
 
         benchmark_result_lines.append(benchmark_result_line)
 
