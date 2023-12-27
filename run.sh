@@ -22,6 +22,7 @@ echo "Giving nodes a minute to be completely ready..."
 sleep 60
 
 echo "Running benchmark..."
+export ADD_NORMALIZED_RESULTS='true'
 python3 benchmark.py
 
 echo "Destroying cluster..."
