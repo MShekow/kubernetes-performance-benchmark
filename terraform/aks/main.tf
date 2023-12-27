@@ -26,6 +26,9 @@ resource "azurerm_kubernetes_cluster" "k8s" {
     node_count           = 1
     enable_auto_scaling  = false
     orchestrator_version = var.kubernetes_version
+    upgrade_settings { # set the platform-side default also on the client-side to avoid unnecessary updates
+      max_surge = "10%"
+    }
   }
 
   linux_profile {
