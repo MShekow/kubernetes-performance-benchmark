@@ -23,6 +23,7 @@ The `run.sh` script:
   ```
   
   Note that the _raw_ results are also stored in the `raw-logs/<YYYY-MM-DD-HH-mm>` directory, in case you want to re-parse them later (see below)
+- Destroy the Kubernetes cluster via Terraform
 
 This framework can be easily extended to run other benchmarks (e.g. to benchmark GPU capabilities), by using a different Docker image.
 
