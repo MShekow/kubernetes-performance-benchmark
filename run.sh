@@ -8,11 +8,13 @@ if [ -z "$K8S_PROVIDER" ]; then
   exit 1
 fi
 
+max_parallel=50
+
 source venv/bin/activate
 
 cd terraform/$K8S_PROVIDER
 terraform init
-terraform apply -auto-approve
+terraform apply -auto-approve -parallelism=$max_parallel
 terraform output -raw kube_config > ../../kubeconfig
 cd ../..
 
@@ -24,4 +26,4 @@ python3 benchmark.py
 
 echo "Destroying cluster..."
 cd terraform/$K8S_PROVIDER
-terraform destroy -auto-approve
+terraform destroy -auto-approve -parallelism=$max_parallel
