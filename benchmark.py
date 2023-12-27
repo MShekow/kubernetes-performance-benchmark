@@ -174,8 +174,8 @@ def extract_relevant_log_lines(pod_log: str, node_pool_name: str) -> list[str]:
         raise ValueError(f"Unable to find the next empty line after the marker line '{MARKER_LINE}' in "
                          f"the '{node_pool_name}' Pod log")
 
-    if "Virtual Disk" not in log_lines[empty_line_index + 1]:
-        raise ValueError(f"Expected 'Virtual Disk' line in the '{node_pool_name}' Pod log, but it is missing")
+    if "Disk" not in log_lines[empty_line_index + 1]:
+        raise ValueError(f"Expected 'Disk' line in the '{node_pool_name}' Pod log, but it is missing")
 
     relevant_log_lines = log_lines[empty_line_index + 2:]
     return [line for line in relevant_log_lines if line != ""]
