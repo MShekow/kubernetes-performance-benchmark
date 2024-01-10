@@ -47,7 +47,7 @@ _Before_ you run the benchmark, you need to change a few settings:
 - Make sure your system is configured such that Terraform has the permissions to provision the K8s cluster. The specifics depend on your chosen K8s provider.
   - For instance, for `AKS`, this would mean that you either run `az login` (to use your own account), or you set the `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET` and `ARM_TENANT_ID` environment variables (to use a service principal)
 - Configure the Kubernetes provider for which you want to run the experiment: `export K8S_PROVIDER=aks`
-- If you want two additional columns in the resulting CSV file that contains the _normalized_ results (the smallest value being normalized to `100%`), set the environment variable 
+- If you want two additional columns in the resulting CSV file that contains the _normalized_ results (the smallest value being normalized to `100%`), set the environment variable `ADD_NORMALIZED_RESULTS` to "true"
 - Run the experiment: `./run.sh` - this script runs Terraform to provision the K8s cluster, then runs Python which schedules the benchmark `Pod`s and scrapes the results, then calls Terraform again to tear down the infrastructure
 - If any errors occurred, e.g. while running the Python script, you need to **manually** tear down the infrastructure via `terraform destroy -auto-approve`
 
